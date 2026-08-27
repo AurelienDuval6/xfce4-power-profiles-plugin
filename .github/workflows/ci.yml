@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            pkg-config \
+            libgtk-3-dev \
+            libxfce4panel-2.0-dev \
+            libxfce4ui-2-dev \
+            libxfce4util-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+
+      - name: Test
+        run: cargo test --release --lib
+
+      - name: Build
+        run: bash build.sh
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'AurelienDuval6/xfce4-power-profiles-plugin'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      created: ${{ steps.tagcheck.outputs.exists == 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: tagcheck
+        run: |
+          git fetch --tags --force
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+
+      - name: Create and push tag
+        if: steps.tagcheck.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+
+      - name: Create GitHub Release
+        if: steps.tagcheck.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+
+  package-deb:
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:trixie
+            distro: debian-13
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            xz-utils \
+            git \
+            gcc \
+            pkg-config \
+            libgtk-3-dev \
+            libxfce4panel-2.0-dev \
+            libxfce4ui-2-dev \
+            libxfce4util-dev \
+            dpkg-dev
+          update-ca-certificates
+          mkdir -p "$HOME/.cargo"
+          printf '[net]\ngit-fetch-with-cli = true\n' >> "$HOME/.cargo/config.toml"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build plugin
+        run: bash build.sh
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: echo "version=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*\"\(.*\)\".*/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble .deb package
+        run: |
+          set -e
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH=$(dpkg --print-architecture)
+          PKGDIR="pkg"
+          mkdir -p "$PKGDIR/DEBIAN"
+          mkdir -p "$PKGDIR/usr/lib/xfce4/panel/plugins"
+          mkdir -p "$PKGDIR/usr/share/xfce4/panel/plugins"
+          cp libpowerprofiles.so "$PKGDIR/usr/lib/xfce4/panel/plugins/"
+          cp power-profiles.desktop "$PKGDIR/usr/share/xfce4/panel/plugins/"
+          CONTROL="$PKGDIR/DEBIAN/control"
+          printf '%s\n' \
+            "Package: xfce4-power-profiles-plugin" \
+            "Version: $VERSION" \
+            "Section: misc" \
+            "Priority: optional" \
+            "Architecture: $ARCH" \
+            "Maintainer: Aurelien Duval <aurelienduval6@gmail.com>" \
+            "Depends: libgtk-3-0, xfce4-panel" \
+            "Description: XFCE4 panel plugin for managing power profiles" \
+            " XFCE4 panel plugin to switch between power profiles (power-saver," \
+            " balanced, performance) via power-profiles-daemon, TLP or system76-power." \
+            > "$CONTROL"
+          dpkg-deb --build "$PKGDIR" "xfce4-power-profiles-plugin_${VERSION}_${ARCH}.deb"
+
+      - name: Upload .deb to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: xfce4-power-profiles-plugin_*.deb
+
