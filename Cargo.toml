@@ -1,0 +1,23 @@
+[package]
+name = "xfce4-power-profiles-plugin"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "powerprofiles"
+crate-type = ["staticlib"]
+
+[dependencies]
+gtk = { version = "0.18", features = ["v3_24"] }
+glib = "0.18"
+glib-sys = "0.18"
+gobject-sys = "0.18"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
