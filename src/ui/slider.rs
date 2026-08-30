@@ -161,7 +161,7 @@ impl PowerProfilesWidget {
         let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
         scale.set_draw_value(false);
         scale.set_hexpand(true);
-        scale.set_size_request(250, -1);
+        scale.set_size_request(180, -1);
 
         let mark_fixed = gtk::Fixed::new();
         mark_fixed.set_halign(gtk::Align::Fill);
