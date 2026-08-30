@@ -105,6 +105,18 @@ impl PowerProfilesWidget {
         button.set_tooltip_text(Some("Balanced"));
 
         let popup = gtk::Window::new(gtk::WindowType::Toplevel);
+        // Configure as a menu-like popup *before* the window is ever realized
+        // (the show_all()/hide() below). Many window managers only honor
+        // decoration/taskbar/type-hint changes seen at the window's first
+        // map, so setting these afterwards would leave the popup permanently
+        // looking and behaving like a normal application window, even though
+        // `xfce_panel_plugin_popup_window()` re-applies them on every show.
+        popup.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
+        popup.set_decorated(false);
+        popup.set_resizable(false);
+        popup.set_skip_taskbar_hint(true);
+        popup.set_skip_pager_hint(true);
+        popup.stick();
 
         let adjustment = gtk::Adjustment::new(1.0, 0.0, 2.0, 1.0, 1.0, 0.0);
         let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
@@ -116,6 +128,10 @@ impl PowerProfilesWidget {
         mark_fixed.set_halign(gtk::Align::Fill);
 
         let popup_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // Picks up the theme's menu background/border/shadow so the popup
+        // reads as a context menu (like xfce4-pulseaudio-plugin's GtkMenu)
+        // instead of a bare undecorated window.
+        popup_box.style_context().add_class(gtk::STYLE_CLASS_MENU);
         popup_box.set_margin_start(8);
         popup_box.set_margin_end(8);
         popup_box.set_margin_top(6);
