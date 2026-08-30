@@ -167,10 +167,10 @@ impl PowerProfilesWidget {
         mark_fixed.set_halign(gtk::Align::Fill);
 
         let popup_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        popup_box.set_margin_start(8);
-        popup_box.set_margin_end(8);
-        popup_box.set_margin_top(6);
-        popup_box.set_margin_bottom(6);
+        popup_box.set_margin_start(4);
+        popup_box.set_margin_end(4);
+        popup_box.set_margin_top(2);
+        popup_box.set_margin_bottom(2);
         popup_box.pack_start(&scale, true, true, 0);
         popup_box.pack_start(&mark_fixed, false, false, 0);
 
