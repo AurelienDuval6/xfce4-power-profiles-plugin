@@ -1,14 +1,25 @@
-//! Panel button with popup slider for power profile selection.
+//! Panel button with popup menu for power profile selection.
 //!
-//! The popup is displayed via the C shim's `xfce_panel_plugin_popup_window()`
-//! which handles positioning, auto-hide locking, and click-outside dismissal.
-//! The slider uses system icons (`power-profile-*-symbolic`) at mark positions
-//! with a [`gtk::Fixed`] overlay for precise alignment.
+//! The popup is a real `GtkMenu` (shown via the C shim's
+//! `xfce_panel_plugin_popup_menu()`), so it gets the theme's native menu
+//! chrome (background, border, shadow) and positioning/dismissal behavior
+//! for free — the same mechanism plugins like xfce4-pulseaudio-plugin use.
+//!
+//! The slider lives inside a single `GtkMenuItem`. `GtkMenuShell` holds the
+//! pointer grab while a menu is open and dispatches button/motion events to
+//! the active item itself rather than letting them propagate to nested
+//! children, so a plain child `GtkScale` would never receive them. Instead,
+//! button/motion events on the item are manually re-targeted at the scale
+//! (see [`forward_button_event`] / [`forward_motion_event`]), mirroring
+//! xfce4-pulseaudio-plugin's `XfpaScaleMenuItem`. Mark icons
+//! (`power-profile-*-symbolic`) are placed at scale tick positions using a
+//! [`gtk::Fixed`] overlay for precise alignment.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
+use glib::translate::ToGlibPtrMut;
 use gtk::prelude::*;
 
 /// Maps a profile name to its standard Adwaita symbolic icon name.
@@ -59,19 +70,61 @@ mod tests {
     }
 }
 
-// C shim function for xfce_panel_plugin_popup_window().
+// C shim function for xfce_panel_plugin_popup_menu().
 //
-// Handles popup positioning, auto-hide locking, click-outside dismissal,
-// and Wayland layer-shell. Sets GDK_WINDOW_TYPE_HINT_UTILITY on the window.
+// Handles alignment, auto-hide locking, and the native positioning/dismissal
+// behavior of a GtkMenu.
 extern "C" {
-    fn plugin_popup_window(plugin: *mut c_void, window: *mut c_void, widget: *mut c_void);
+    fn plugin_popup_menu(plugin: *mut c_void, menu: *mut c_void, widget: *mut c_void);
+}
+
+/// Forwards a button event to `scale` if it lands within the scale's
+/// allocation, translating its coordinates from `item`'s space into the
+/// scale's own before re-delivering it.
+fn forward_button_event(item: &gtk::MenuItem, scale: &gtk::Scale, event: &gtk::gdk::EventButton) {
+    let (x, y) = event.position();
+    let Some((sx, sy)) = item.translate_coordinates(scale, x as i32, y as i32) else {
+        return;
+    };
+    let alloc = scale.allocation();
+    if sx <= 0 || sx >= alloc.width() || sy <= 0 || sy >= alloc.height() {
+        return;
+    }
+    let mut translated = event.clone();
+    unsafe {
+        let raw = translated.to_glib_none_mut().0;
+        (*raw).x = sx as f64;
+        (*raw).y = sy as f64;
+    }
+    scale.event(&translated);
+}
+
+/// Forwards a motion event to `scale` if it lands within the scale's
+/// allocation, translating its coordinates from `item`'s space into the
+/// scale's own before re-delivering it. Needed for continuous drag updates.
+fn forward_motion_event(item: &gtk::MenuItem, scale: &gtk::Scale, event: &gtk::gdk::EventMotion) {
+    let (x, y) = event.position();
+    let Some((sx, sy)) = item.translate_coordinates(scale, x as i32, y as i32) else {
+        return;
+    };
+    let alloc = scale.allocation();
+    if sx <= 0 || sx >= alloc.width() || sy <= 0 || sy >= alloc.height() {
+        return;
+    }
+    let mut translated = event.clone();
+    unsafe {
+        let raw = translated.to_glib_none_mut().0;
+        (*raw).x = sx as f64;
+        (*raw).y = sy as f64;
+    }
+    scale.event(&translated);
 }
 
 /// Internal widget state. Wrapped in `Rc<RefCell<>>` for shared ownership.
 struct Inner {
     button: gtk::Button,
     image: gtk::Image,
-    popup: gtk::Window,
+    menu: gtk::Menu,
     scale: gtk::Scale,
     mark_icons: Vec<gtk::Image>,
     profiles: Vec<String>,
@@ -79,7 +132,7 @@ struct Inner {
     plugin: *mut c_void,
 }
 
-/// Panel widget with button, popup slider, and D-Bus integration.
+/// Panel widget with button, popup menu, and D-Bus integration.
 ///
 /// Cloneable via `Rc` (not deep clone). The `updating` flag is a separate
 /// `Cell<bool>` outside the `RefCell<Inner>` to prevent re-entrant borrow
@@ -92,7 +145,7 @@ pub struct PowerProfilesWidget {
 }
 
 impl PowerProfilesWidget {
-    /// Creates the panel button and popup window with a horizontal scale.
+    /// Creates the panel button and popup menu with a horizontal scale.
     pub fn new(plugin: *mut c_void) -> Self {
         let image = gtk::Image::from_icon_name(
             Some("power-profile-balanced-symbolic"),
@@ -104,20 +157,6 @@ impl PowerProfilesWidget {
         button.set_focus_on_click(false);
         button.set_tooltip_text(Some("Balanced"));
 
-        let popup = gtk::Window::new(gtk::WindowType::Toplevel);
-        // Configure as a menu-like popup *before* the window is ever realized
-        // (the show_all()/hide() below). Many window managers only honor
-        // decoration/taskbar/type-hint changes seen at the window's first
-        // map, so setting these afterwards would leave the popup permanently
-        // looking and behaving like a normal application window, even though
-        // `xfce_panel_plugin_popup_window()` re-applies them on every show.
-        popup.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
-        popup.set_decorated(false);
-        popup.set_resizable(false);
-        popup.set_skip_taskbar_hint(true);
-        popup.set_skip_pager_hint(true);
-        popup.stick();
-
         let adjustment = gtk::Adjustment::new(1.0, 0.0, 2.0, 1.0, 1.0, 0.0);
         let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
         scale.set_draw_value(false);
@@ -128,10 +167,6 @@ impl PowerProfilesWidget {
         mark_fixed.set_halign(gtk::Align::Fill);
 
         let popup_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        // Picks up the theme's menu background/border/shadow so the popup
-        // reads as a context menu (like xfce4-pulseaudio-plugin's GtkMenu)
-        // instead of a bare undecorated window.
-        popup_box.style_context().add_class(gtk::STYLE_CLASS_MENU);
         popup_box.set_margin_start(8);
         popup_box.set_margin_end(8);
         popup_box.set_margin_top(6);
@@ -139,16 +174,43 @@ impl PowerProfilesWidget {
         popup_box.pack_start(&scale, true, true, 0);
         popup_box.pack_start(&mark_fixed, false, false, 0);
 
-        popup.add(&popup_box);
+        let item = gtk::MenuItem::new();
+        item.add(&popup_box);
+        // Menu items only request enter/leave events by default (for hover
+        // highlighting); continuous drag updates need motion events too.
+        item.add_events(
+            gtk::gdk::EventMask::POINTER_MOTION_MASK | gtk::gdk::EventMask::BUTTON_MOTION_MASK,
+        );
+        {
+            let scale = scale.clone();
+            item.connect_button_press_event(move |item, event| {
+                forward_button_event(item, &scale, event);
+                glib::Propagation::Stop
+            });
+        }
+        {
+            let scale = scale.clone();
+            item.connect_button_release_event(move |item, event| {
+                forward_button_event(item, &scale, event);
+                glib::Propagation::Stop
+            });
+        }
+        {
+            let scale = scale.clone();
+            item.connect_motion_notify_event(move |item, event| {
+                forward_motion_event(item, &scale, event);
+                glib::Propagation::Stop
+            });
+        }
 
-        // Initial show/hide to ensure the window is realized before popup_window() uses it.
-        popup.show_all();
-        popup.hide();
+        let menu = gtk::Menu::new();
+        menu.append(&item);
+        menu.show_all();
 
         let inner = Inner {
             button,
             image,
-            popup,
+            menu,
             scale,
             mark_icons: Vec::new(),
             profiles: Vec::new(),
@@ -211,15 +273,15 @@ impl PowerProfilesWidget {
 
     /// Connects button click and scale value-changed signals.
     fn setup_signals(&self) {
-        // Button click → show popup via xfce_panel_plugin_popup_window().
+        // Button click → show popup via xfce_panel_plugin_popup_menu().
         {
             let this = self.clone();
             self.inner.borrow().button.connect_clicked(move |_| {
                 let inner = this.inner.borrow();
                 unsafe {
-                    plugin_popup_window(
+                    plugin_popup_menu(
                         inner.plugin,
-                        inner.popup.as_ptr().cast::<c_void>(),
+                        inner.menu.as_ptr().cast::<c_void>(),
                         inner.button.as_ptr().cast::<c_void>(),
                     );
                 }
