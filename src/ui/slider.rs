@@ -212,7 +212,8 @@ impl PowerProfilesWidget {
         let mark_fixed = gtk::Fixed::new();
         mark_fixed.set_halign(gtk::Align::Fill);
 
-        let profile_label = gtk::Label::new(Some("Current profile: Balanced"));
+        let profile_label = gtk::Label::new(None);
+        profile_label.set_markup("<b>Current profile:</b> <i>Balanced</i>");
         profile_label.set_halign(gtk::Align::Start);
         profile_label.set_margin_bottom(4);
 
@@ -440,9 +441,10 @@ impl PowerProfilesWidget {
             .image
             .set_from_icon_name(Some(profile_icon(name)), gtk::IconSize::SmallToolbar);
         inner.button.set_tooltip_text(Some(name));
-        inner
-            .profile_label
-            .set_text(&format!("Current profile: {name}"));
+        inner.profile_label.set_markup(&format!(
+            "<b>Current profile:</b> <i>{}</i>",
+            glib::markup_escape_text(name)
+        ));
         self.updating.set(false);
     }
 
