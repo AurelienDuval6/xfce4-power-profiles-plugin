@@ -8,10 +8,15 @@
 //! The slider lives inside a single `GtkMenuItem`. `GtkMenuShell` holds the
 //! pointer grab while a menu is open and dispatches button/motion events to
 //! the active item itself rather than letting them propagate to nested
-//! children, so a plain child `GtkScale` would never receive them. Instead,
-//! button/motion events on the item are manually re-targeted at the scale
-//! (see [`forward_button_event`] / [`forward_motion_event`]), mirroring
-//! xfce4-pulseaudio-plugin's `XfpaScaleMenuItem`. Mark icons
+//! children, so a plain child `GtkScale` never receives them and can't run
+//! its own click/drag handling. Forwarding synthetic events into the scale
+//! via `gtk_widget_event()` (as xfce4-pulseaudio-plugin's `XfpaScaleMenuItem`
+//! does in C) turned out to be unreliable here — `GtkRange`'s internal
+//! button/motion handling in this GTK version only accepted about 1 in 30
+//! forwarded events, presumably due to state it tracks against the event's
+//! original window. Instead, [`value_at`] computes the target value directly
+//! from the click/drag position and sets it on the scale, sidestepping
+//! `GtkRange`'s internal event handling entirely. Mark icons
 //! (`power-profile-*-symbolic`) are placed at scale tick positions using a
 //! [`gtk::Fixed`] overlay for precise alignment.
 
@@ -19,8 +24,13 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
-use glib::translate::ToGlibPtrMut;
 use gtk::prelude::*;
+
+/// Approximate padding, in pixels, between a [`gtk::Scale`]'s allocation edge
+/// and its trough. Used both here (to map a click position to a value) and in
+/// [`PowerProfilesWidget::reposition_marks`] (to place mark icons), so clicks
+/// line up with where the icons visually sit.
+const TROUGH_PAD: f64 = 12.0;
 
 /// Maps a profile name to its standard Adwaita symbolic icon name.
 fn profile_icon(name: &str) -> &str {
@@ -31,9 +41,58 @@ fn profile_icon(name: &str) -> &str {
     }
 }
 
+/// Ranks a profile name for low-to-high power ordering on the slider.
+///
+/// `power-profiles-daemon` doesn't guarantee any particular order for its
+/// `Profiles` property (e.g. it reports `balanced, performance, power-saver`
+/// on some backends), which would otherwise scatter the well-known profiles
+/// across the slider instead of a sensible power-saver→balanced→performance
+/// layout. Unrecognized profiles sort after the three well-known ones.
+fn profile_rank(name: &str) -> u8 {
+    match name {
+        "power-saver" => 0,
+        "balanced" => 1,
+        "performance" => 2,
+        _ => 3,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::profile_icon;
+    use super::{profile_icon, profile_rank, value_from_trough_x};
+
+    #[test]
+    fn maps_trough_center_to_middle_value() {
+        assert_eq!(value_from_trough_x(114.0, 228.0, 0.0, 2.0), 1.0);
+    }
+
+    #[test]
+    fn clamps_positions_before_the_leading_pad_to_the_lower_bound() {
+        assert_eq!(value_from_trough_x(0.0, 228.0, 0.0, 2.0), 0.0);
+    }
+
+    #[test]
+    fn clamps_positions_past_the_trailing_pad_to_the_upper_bound() {
+        assert_eq!(value_from_trough_x(228.0, 228.0, 0.0, 2.0), 2.0);
+    }
+
+    #[test]
+    fn ranks_profiles_low_to_high_power_regardless_of_input_order() {
+        let mut profiles = vec![
+            "balanced".to_owned(),
+            "performance".to_owned(),
+            "power-saver".to_owned(),
+        ];
+        profiles.sort_by_key(|name| profile_rank(name));
+        assert_eq!(profiles, ["power-saver", "balanced", "performance"]);
+    }
+
+    #[test]
+    fn ranks_unknown_profiles_after_the_well_known_ones() {
+        let mut profiles = vec!["custom-backend-profile".to_owned(), "balanced".to_owned()];
+        profiles.sort_by_key(|name| profile_rank(name));
+        assert_eq!(profiles, ["balanced", "custom-backend-profile"]);
+    }
 
     #[test]
     fn maps_known_power_saver_profile() {
@@ -78,46 +137,32 @@ extern "C" {
     fn plugin_popup_menu(plugin: *mut c_void, menu: *mut c_void, widget: *mut c_void);
 }
 
-/// Forwards a button event to `scale` if it lands within the scale's
-/// allocation, translating its coordinates from `item`'s space into the
-/// scale's own before re-delivering it.
-fn forward_button_event(item: &gtk::MenuItem, scale: &gtk::Scale, event: &gtk::gdk::EventButton) {
-    let (x, y) = event.position();
-    let Some((sx, sy)) = item.translate_coordinates(scale, x as i32, y as i32) else {
-        return;
-    };
-    let alloc = scale.allocation();
-    if sx <= 0 || sx >= alloc.width() || sy <= 0 || sy >= alloc.height() {
-        return;
-    }
-    let mut translated = event.clone();
-    unsafe {
-        let raw = translated.to_glib_none_mut().0;
-        (*raw).x = sx as f64;
-        (*raw).y = sy as f64;
-    }
-    scale.event(&translated);
+/// Maps an x position within a scale's allocation to an adjustment value,
+/// clamping to `[lower, upper]` rather than failing for positions in the
+/// [`TROUGH_PAD`] margins at either edge.
+fn value_from_trough_x(x: f64, alloc_width: f64, lower: f64, upper: f64) -> f64 {
+    let trough_w = (alloc_width - 2.0 * TROUGH_PAD).max(1.0);
+    let frac = ((x - TROUGH_PAD) / trough_w).clamp(0.0, 1.0);
+    lower + frac * (upper - lower)
 }
 
-/// Forwards a motion event to `scale` if it lands within the scale's
-/// allocation, translating its coordinates from `item`'s space into the
-/// scale's own before re-delivering it. Needed for continuous drag updates.
-fn forward_motion_event(item: &gtk::MenuItem, scale: &gtk::Scale, event: &gtk::gdk::EventMotion) {
-    let (x, y) = event.position();
-    let Some((sx, sy)) = item.translate_coordinates(scale, x as i32, y as i32) else {
-        return;
-    };
+/// Computes the scale's adjustment value for a click/drag at `(event_x,
+/// event_y)`, given in `item`'s coordinate space. Returns `None` if the
+/// position falls outside the scale's own allocation.
+fn value_at(item: &gtk::MenuItem, scale: &gtk::Scale, event_x: f64, event_y: f64) -> Option<f64> {
+    let (sx, sy) = item.translate_coordinates(scale, event_x as i32, event_y as i32)?;
     let alloc = scale.allocation();
     if sx <= 0 || sx >= alloc.width() || sy <= 0 || sy >= alloc.height() {
-        return;
+        return None;
     }
-    let mut translated = event.clone();
-    unsafe {
-        let raw = translated.to_glib_none_mut().0;
-        (*raw).x = sx as f64;
-        (*raw).y = sy as f64;
-    }
-    scale.event(&translated);
+
+    let adj = scale.adjustment();
+    Some(value_from_trough_x(
+        f64::from(sx),
+        f64::from(alloc.width()),
+        adj.lower(),
+        adj.upper(),
+    ))
 }
 
 /// Internal widget state. Wrapped in `Rc<RefCell<>>` for shared ownership.
@@ -125,6 +170,7 @@ struct Inner {
     button: gtk::Button,
     image: gtk::Image,
     menu: gtk::Menu,
+    profile_label: gtk::Label,
     scale: gtk::Scale,
     mark_icons: Vec<gtk::Image>,
     profiles: Vec<String>,
@@ -166,11 +212,16 @@ impl PowerProfilesWidget {
         let mark_fixed = gtk::Fixed::new();
         mark_fixed.set_halign(gtk::Align::Fill);
 
+        let profile_label = gtk::Label::new(Some("Current profile: Balanced"));
+        profile_label.set_halign(gtk::Align::Start);
+        profile_label.set_margin_bottom(4);
+
         let popup_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         popup_box.set_margin_start(4);
         popup_box.set_margin_end(4);
         popup_box.set_margin_top(2);
         popup_box.set_margin_bottom(2);
+        popup_box.pack_start(&profile_label, false, false, 0);
         popup_box.pack_start(&scale, true, true, 0);
         popup_box.pack_start(&mark_fixed, false, false, 0);
 
@@ -181,24 +232,41 @@ impl PowerProfilesWidget {
         item.add_events(
             gtk::gdk::EventMask::POINTER_MOTION_MASK | gtk::gdk::EventMask::BUTTON_MOTION_MASK,
         );
+        // Tracks whether the primary button is held down over the item, so
+        // motion events only drag the slider during an actual click-drag.
+        let dragging = Rc::new(Cell::new(false));
         {
             let scale = scale.clone();
+            let dragging = dragging.clone();
             item.connect_button_press_event(move |item, event| {
-                forward_button_event(item, &scale, event);
+                if event.button() == 1 {
+                    dragging.set(true);
+                    let (x, y) = event.position();
+                    if let Some(value) = value_at(item, &scale, x, y) {
+                        scale.set_value(value);
+                    }
+                }
                 glib::Propagation::Stop
             });
         }
         {
-            let scale = scale.clone();
-            item.connect_button_release_event(move |item, event| {
-                forward_button_event(item, &scale, event);
+            let dragging = dragging.clone();
+            item.connect_button_release_event(move |_, event| {
+                if event.button() == 1 {
+                    dragging.set(false);
+                }
                 glib::Propagation::Stop
             });
         }
         {
             let scale = scale.clone();
             item.connect_motion_notify_event(move |item, event| {
-                forward_motion_event(item, &scale, event);
+                if dragging.get() {
+                    let (x, y) = event.position();
+                    if let Some(value) = value_at(item, &scale, x, y) {
+                        scale.set_value(value);
+                    }
+                }
                 glib::Propagation::Stop
             });
         }
@@ -211,6 +279,7 @@ impl PowerProfilesWidget {
             button,
             image,
             menu,
+            profile_label,
             scale,
             mark_icons: Vec::new(),
             profiles: Vec::new(),
@@ -243,7 +312,8 @@ impl PowerProfilesWidget {
     /// Recalculates mark icon positions based on the scale's trough geometry.
     ///
     /// Icons are placed in a `gtk::Fixed` overlay. Positions are computed from
-    /// the scale's allocation with a 12px pad approximation for the trough edges.
+    /// the scale's allocation using the same [`TROUGH_PAD`] approximation
+    /// [`value_at`] uses, so the icons line up with where clicks register.
     fn reposition_marks(&self, scale: &gtk::Scale) {
         let inner = self.inner.borrow();
         let icons = &inner.mark_icons;
@@ -261,12 +331,11 @@ impl PowerProfilesWidget {
         }
 
         let alloc = scale.allocation();
-        let pad = 12;
-        let trough_w = alloc.width() - 2 * pad;
+        let trough_w = f64::from(alloc.width()) - 2.0 * TROUGH_PAD;
 
         for (i, icon) in icons.iter().enumerate() {
             let v = i as f64;
-            let px = ((v - lower) / range).mul_add(trough_w as f64, pad as f64);
+            let px = ((v - lower) / range).mul_add(trough_w, TROUGH_PAD);
             self.mark_fixed.move_(icon, (px - 8.0).max(0.0) as i32, 0);
         }
     }
@@ -323,7 +392,9 @@ impl PowerProfilesWidget {
     pub fn update_profiles(&self, profiles: &[String]) {
         self.updating.set(true);
         let mut inner = self.inner.borrow_mut();
-        inner.profiles = profiles.to_vec();
+        let mut profiles = profiles.to_vec();
+        profiles.sort_by_key(|name| profile_rank(name));
+        inner.profiles = profiles.clone();
 
         for child in self.mark_fixed.children() {
             self.mark_fixed.remove(&child);
@@ -343,7 +414,7 @@ impl PowerProfilesWidget {
                     .scale
                     .add_mark(i as f64, gtk::PositionType::Bottom, None);
             }
-            for name in profiles {
+            for name in &profiles {
                 let icon = gtk::Image::from_icon_name(
                     Some(profile_icon(name)),
                     gtk::IconSize::SmallToolbar,
@@ -369,6 +440,9 @@ impl PowerProfilesWidget {
             .image
             .set_from_icon_name(Some(profile_icon(name)), gtk::IconSize::SmallToolbar);
         inner.button.set_tooltip_text(Some(name));
+        inner
+            .profile_label
+            .set_text(&format!("Current profile: {name}"));
         self.updating.set(false);
     }
 
