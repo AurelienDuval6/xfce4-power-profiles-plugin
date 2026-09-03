@@ -33,6 +33,11 @@ use gtk::prelude::*;
 const TROUGH_PAD: f64 = 12.0;
 
 /// Minimum width, in pixels, requested for the popup's scale.
+///
+/// `scale`'s real allocated width always ends up a little more than this —
+/// see [`PowerProfilesWidget::reposition_marks`] for why that extra amount
+/// is measured live each show rather than hardcoded, and
+/// [`PowerProfilesWidget::trough_width`] for the mechanism.
 const SCALE_WIDTH: f64 = 180.0;
 
 /// Maps a profile name to its standard Adwaita symbolic icon name.
@@ -146,6 +151,15 @@ struct Inner {
     plugin: *mut c_void,
 }
 
+/// Tracks [`PowerProfilesWidget::trough_width`] as it settles — see that
+/// field's doc comment.
+#[derive(Clone, Copy)]
+enum TroughWidth {
+    Unread,
+    Pending(f64),
+    Settled(f64),
+}
+
 /// Panel widget with button, popup menu, and D-Bus integration.
 ///
 /// Cloneable via `Rc` (not deep clone). The `updating` flag is a separate
@@ -156,6 +170,11 @@ pub struct PowerProfilesWidget {
     inner: Rc<RefCell<Inner>>,
     updating: Rc<Cell<bool>>,
     mark_fixed: gtk::Fixed,
+    /// `scale`'s real settled allocated width, captured live once it stops
+    /// changing between calls and reused from then on — see
+    /// [`PowerProfilesWidget::reposition_marks`] for why it's captured this
+    /// way rather than read fresh every time or hardcoded as a constant.
+    trough_width: Rc<Cell<TroughWidth>>,
 }
 
 impl PowerProfilesWidget {
@@ -180,26 +199,13 @@ impl PowerProfilesWidget {
         let mark_fixed = gtk::Fixed::new();
         mark_fixed.set_halign(gtk::Align::Fill);
 
-        // Wrapping mark_fixed in a scrolled window (scrollbars disabled) stops
-        // its own requested width from ever propagating up into popup_box —
-        // see reposition_marks() for why that propagation is what made the
-        // popup grow wider on every open. mark_fixed still receives its real
-        // allocated width from its sibling `scale` via this wrapper; only
-        // the upward leak is blocked.
-        let marks_scroller = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-        marks_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
-        marks_scroller.set_shadow_type(gtk::ShadowType::None);
-        marks_scroller.set_propagate_natural_width(false);
-        marks_scroller.set_min_content_height(20);
-        marks_scroller.add(&mark_fixed);
-
         let popup_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         popup_box.set_margin_start(4);
         popup_box.set_margin_end(4);
         popup_box.set_margin_top(2);
         popup_box.set_margin_bottom(2);
         popup_box.pack_start(&scale, true, true, 0);
-        popup_box.pack_start(&marks_scroller, false, false, 0);
+        popup_box.pack_start(&mark_fixed, false, false, 0);
 
         let item = gtk::MenuItem::new();
         item.add(&popup_box);
@@ -248,6 +254,16 @@ impl PowerProfilesWidget {
         }
 
         let menu = gtk::Menu::new();
+        // GtkMenuShell reserves a "toggle size" — space for a checkbox or
+        // radio indicator — before each item's left edge by default, sized
+        // to whatever the widest such indicator among the menu's items
+        // would need, so mixed plain/check/radio items still line up. This
+        // menu only ever has the one plain item, but the reservation still
+        // applies unconditionally, unaffected by
+        // GtkMenuItem::reserve-indicator (that only concerns *this* item's
+        // own indicator, not the menu-wide aggregate). Disabling it here is
+        // what actually fixes the asymmetric margin.
+        menu.set_reserve_toggle_size(false);
         menu.append(&item);
         menu.show_all();
 
@@ -286,6 +302,7 @@ impl PowerProfilesWidget {
             inner: Rc::new(RefCell::new(inner)),
             updating: Rc::new(Cell::new(false)),
             mark_fixed,
+            trough_width: Rc::new(Cell::new(TroughWidth::Unread)),
         };
 
         // Reposition mark icons whenever the scale is resized.
@@ -306,23 +323,37 @@ impl PowerProfilesWidget {
 
     /// Recalculates mark icon positions based on the scale's trough geometry.
     ///
-    /// Icons are placed in a `gtk::Fixed` overlay. Positions are computed from
-    /// the scale's live allocation using the same [`TROUGH_PAD`] approximation
-    /// [`value_at`] uses, so the icons line up with where clicks register —
-    /// including when the popup ends up wider than [`SCALE_WIDTH`] (e.g. a
-    /// long profile name widens the label above the scale).
+    /// Icons are placed in a `gtk::Fixed` overlay. Positions are computed
+    /// from [`Self::trough_width`] — `scale`'s real allocated width, once it
+    /// settles — using the same [`TROUGH_PAD`] approximation [`value_at`]
+    /// uses, so the icons line up with where clicks register.
     ///
-    /// Reading a live allocation here is safe only because `mark_fixed` is
-    /// wrapped in a `GtkScrolledWindow` with `propagate-natural-width`
-    /// disabled (see `new()`). Without that wrapper, `mark_fixed`'s own
-    /// requested width — `max(child.x + child.width)`, per GTK's
-    /// `GtkFixed` — would leak into the shared box's width on the cross
-    /// axis, which would in turn widen `scale`'s next allocation and get
-    /// read back in here, compounding a little further on every open (the
-    /// menu and its children are created once and reused, so the drift
-    /// never resets). The scrolled-window wrapper lets `mark_fixed` receive
-    /// its real allocated width from its siblings without its own natural
-    /// width ever propagating back up.
+    /// `scale`'s real allocated width always ends up a little more than
+    /// [`SCALE_WIDTH`] (menu/menu-item chrome pads it further, even with
+    /// `menu.set_reserve_toggle_size(false)` in `new()` — see that call's
+    /// doc comment for the *other*, larger and asymmetric, padding problem
+    /// it fixes). That extra amount isn't a fixed constant: it was measured
+    /// at 180, 194, 198, and 202px across separate panel restarts — a
+    /// same-theme, same-machine spread wide enough to visibly throw off
+    /// mark positions if hardcoded (icons drifting further right the higher
+    /// their value, since `power-saver` sits at the trough's zero point
+    /// regardless of width but `balanced`/`performance` don't).
+    ///
+    /// So this reads the live allocation instead — but not on every call.
+    /// `mark_fixed` is a sibling of `scale` in the same box, and a
+    /// `GtkFixed`'s minimum width always equals its natural width — both are
+    /// simply `max(child.x + child.width)`, with no "needs" vs. "would
+    /// like" distinction a wrapping container could otherwise cap. So
+    /// whatever `mark_fixed` requests here leaks into the shared box's
+    /// width, which widens `scale`'s next allocation, which would get read
+    /// back in on the *next* call if read live unconditionally —
+    /// compounding a little further on every open (the menu and its
+    /// children are created once and reused, so the drift never resets on
+    /// its own); confirmed empirically as a live reproduction of the
+    /// original growth bug. Reading until the value repeats, then freezing
+    /// there for good, gets the precision of a live read (tracking
+    /// whatever this session's real width happens to be) without an
+    /// unbounded read ever remaining in the loop to compound.
     fn reposition_marks(&self, scale: &gtk::Scale) {
         let inner = self.inner.borrow();
         let icons = &inner.mark_icons;
@@ -339,8 +370,28 @@ impl PowerProfilesWidget {
             return;
         }
 
-        let alloc = scale.allocation();
-        let trough_w = f64::from(alloc.width()) - 2.0 * TROUGH_PAD;
+        let scale_width = match self.trough_width.get() {
+            TroughWidth::Settled(w) => w,
+            TroughWidth::Unread => {
+                let w = f64::from(scale.allocation().width());
+                if w > 0.0 {
+                    self.trough_width.set(TroughWidth::Pending(w));
+                }
+                w
+            }
+            TroughWidth::Pending(prev) => {
+                let w = f64::from(scale.allocation().width());
+                if w > 0.0 {
+                    self.trough_width.set(if (w - prev).abs() < f64::EPSILON {
+                        TroughWidth::Settled(w)
+                    } else {
+                        TroughWidth::Pending(w)
+                    });
+                }
+                w
+            }
+        };
+        let trough_w = scale_width - 2.0 * TROUGH_PAD;
 
         for (i, icon) in icons.iter().enumerate() {
             let v = i as f64;
