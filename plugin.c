@@ -10,8 +10,10 @@ void plugin_block_autohide(gpointer plugin, gboolean block) {
     xfce_panel_plugin_block_autohide(XFCE_PANEL_PLUGIN(plugin), block);
 }
 
-// Wraps xfce_panel_plugin_popup_window() — handles positioning, auto-hide
-// locking, click-outside dismissal, and Wayland layer-shell.
-void plugin_popup_window(gpointer plugin, gpointer window, gpointer widget) {
-    xfce_panel_plugin_popup_window(XFCE_PANEL_PLUGIN(plugin), GTK_WINDOW(window), GTK_WIDGET(widget));
+// Wraps xfce_panel_plugin_popup_menu() — handles alignment, auto-hide
+// locking, and the native positioning/dismissal behavior of a GtkMenu,
+// matching how other xfce4-panel plugins (e.g. xfce4-pulseaudio-plugin)
+// present their popups.
+void plugin_popup_menu(gpointer plugin, gpointer menu, gpointer widget) {
+    xfce_panel_plugin_popup_menu(XFCE_PANEL_PLUGIN(plugin), GTK_MENU(menu), GTK_WIDGET(widget), NULL);
 }
