@@ -32,6 +32,9 @@ use gtk::prelude::*;
 /// line up with where the icons visually sit.
 const TROUGH_PAD: f64 = 12.0;
 
+/// Minimum width, in pixels, requested for the popup's scale.
+const SCALE_WIDTH: f64 = 180.0;
+
 /// Maps a profile name to its standard Adwaita symbolic icon name.
 fn profile_icon(name: &str) -> &str {
     match name {
@@ -207,10 +210,23 @@ impl PowerProfilesWidget {
         let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
         scale.set_draw_value(false);
         scale.set_hexpand(true);
-        scale.set_size_request(180, -1);
+        scale.set_size_request(SCALE_WIDTH as i32, -1);
 
         let mark_fixed = gtk::Fixed::new();
         mark_fixed.set_halign(gtk::Align::Fill);
+
+        // Wrapping mark_fixed in a scrolled window (scrollbars disabled) stops
+        // its own requested width from ever propagating up into popup_box —
+        // see reposition_marks() for why that propagation is what made the
+        // popup grow wider on every open. mark_fixed still receives its real
+        // allocated width from its siblings (scale, profile_label) via this
+        // wrapper; only the upward leak is blocked.
+        let marks_scroller = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+        marks_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+        marks_scroller.set_shadow_type(gtk::ShadowType::None);
+        marks_scroller.set_propagate_natural_width(false);
+        marks_scroller.set_min_content_height(20);
+        marks_scroller.add(&mark_fixed);
 
         let profile_label = gtk::Label::new(None);
         profile_label.set_markup("<b>Current profile:</b> <i>Balanced</i>");
@@ -224,7 +240,7 @@ impl PowerProfilesWidget {
         popup_box.set_margin_bottom(2);
         popup_box.pack_start(&profile_label, false, false, 0);
         popup_box.pack_start(&scale, true, true, 0);
-        popup_box.pack_start(&mark_fixed, false, false, 0);
+        popup_box.pack_start(&marks_scroller, false, false, 0);
 
         let item = gtk::MenuItem::new();
         item.add(&popup_box);
@@ -313,8 +329,22 @@ impl PowerProfilesWidget {
     /// Recalculates mark icon positions based on the scale's trough geometry.
     ///
     /// Icons are placed in a `gtk::Fixed` overlay. Positions are computed from
-    /// the scale's allocation using the same [`TROUGH_PAD`] approximation
-    /// [`value_at`] uses, so the icons line up with where clicks register.
+    /// the scale's live allocation using the same [`TROUGH_PAD`] approximation
+    /// [`value_at`] uses, so the icons line up with where clicks register —
+    /// including when the popup ends up wider than [`SCALE_WIDTH`] (e.g. a
+    /// long profile name widens the label above the scale).
+    ///
+    /// Reading a live allocation here is safe only because `mark_fixed` is
+    /// wrapped in a `GtkScrolledWindow` with `propagate-natural-width`
+    /// disabled (see `new()`). Without that wrapper, `mark_fixed`'s own
+    /// requested width — `max(child.x + child.width)`, per GTK's
+    /// `GtkFixed` — would leak into the shared box's width on the cross
+    /// axis, which would in turn widen `scale`'s next allocation and get
+    /// read back in here, compounding a little further on every open (the
+    /// menu and its children are created once and reused, so the drift
+    /// never resets). The scrolled-window wrapper lets `mark_fixed` receive
+    /// its real allocated width from its siblings without its own natural
+    /// width ever propagating back up.
     fn reposition_marks(&self, scale: &gtk::Scale) {
         let inner = self.inner.borrow();
         let icons = &inner.mark_icons;
