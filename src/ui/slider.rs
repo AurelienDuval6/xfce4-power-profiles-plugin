@@ -292,6 +292,26 @@ impl PowerProfilesWidget {
         menu.append(&item);
         menu.show_all();
 
+        // GtkMenuShell grabs keyboard input while the menu is open and
+        // handles arrow keys itself for item-to-item navigation — a no-op
+        // here since there's only one item, and it never reaches `scale`'s
+        // own default GtkRange key bindings. Handle Left/Right/Up/Down
+        // directly and stop the event so GtkMenuShell's built-in navigation
+        // doesn't otherwise swallow it.
+        {
+            let scale = scale.clone();
+            menu.connect_key_press_event(move |_, event| {
+                let adj = scale.adjustment();
+                let delta = match event.keyval() {
+                    gtk::gdk::keys::constants::Left | gtk::gdk::keys::constants::Down => -1.0,
+                    gtk::gdk::keys::constants::Right | gtk::gdk::keys::constants::Up => 1.0,
+                    _ => return glib::Propagation::Proceed,
+                };
+                scale.set_value((scale.value() + delta).clamp(adj.lower(), adj.upper()));
+                glib::Propagation::Stop
+            });
+        }
+
         let inner = Inner {
             button,
             image,
