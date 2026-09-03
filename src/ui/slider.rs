@@ -139,7 +139,6 @@ struct Inner {
     button: gtk::Button,
     image: gtk::Image,
     menu: gtk::Menu,
-    profile_label: gtk::Label,
     scale: gtk::Scale,
     mark_icons: Vec<gtk::Image>,
     profiles: Vec<String>,
@@ -185,8 +184,8 @@ impl PowerProfilesWidget {
         // its own requested width from ever propagating up into popup_box —
         // see reposition_marks() for why that propagation is what made the
         // popup grow wider on every open. mark_fixed still receives its real
-        // allocated width from its siblings (scale, profile_label) via this
-        // wrapper; only the upward leak is blocked.
+        // allocated width from its sibling `scale` via this wrapper; only
+        // the upward leak is blocked.
         let marks_scroller = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
         marks_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
         marks_scroller.set_shadow_type(gtk::ShadowType::None);
@@ -194,17 +193,11 @@ impl PowerProfilesWidget {
         marks_scroller.set_min_content_height(20);
         marks_scroller.add(&mark_fixed);
 
-        let profile_label = gtk::Label::new(None);
-        profile_label.set_markup("<b>Current profile:</b> <i>Balanced</i>");
-        profile_label.set_halign(gtk::Align::Start);
-        profile_label.set_margin_bottom(4);
-
         let popup_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         popup_box.set_margin_start(4);
         popup_box.set_margin_end(4);
         popup_box.set_margin_top(2);
         popup_box.set_margin_bottom(2);
-        popup_box.pack_start(&profile_label, false, false, 0);
         popup_box.pack_start(&scale, true, true, 0);
         popup_box.pack_start(&marks_scroller, false, false, 0);
 
@@ -282,7 +275,6 @@ impl PowerProfilesWidget {
             button,
             image,
             menu,
-            profile_label,
             scale,
             mark_icons: Vec::new(),
             profiles: Vec::new(),
@@ -456,10 +448,6 @@ impl PowerProfilesWidget {
             .image
             .set_from_icon_name(Some(profile_icon(name)), gtk::IconSize::SmallToolbar);
         inner.button.set_tooltip_text(Some(name));
-        inner.profile_label.set_markup(&format!(
-            "<b>Current profile:</b> <i>{}</i>",
-            glib::markup_escape_text(name)
-        ));
         self.updating.set(false);
     }
 
