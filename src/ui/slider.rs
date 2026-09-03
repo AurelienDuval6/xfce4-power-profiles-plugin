@@ -44,25 +44,9 @@ fn profile_icon(name: &str) -> &str {
     }
 }
 
-/// Ranks a profile name for low-to-high power ordering on the slider.
-///
-/// `power-profiles-daemon` doesn't guarantee any particular order for its
-/// `Profiles` property (e.g. it reports `balanced, performance, power-saver`
-/// on some backends), which would otherwise scatter the well-known profiles
-/// across the slider instead of a sensible power-saver→balanced→performance
-/// layout. Unrecognized profiles sort after the three well-known ones.
-fn profile_rank(name: &str) -> u8 {
-    match name {
-        "power-saver" => 0,
-        "balanced" => 1,
-        "performance" => 2,
-        _ => 3,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{profile_icon, profile_rank, value_from_trough_x};
+    use super::{profile_icon, value_from_trough_x};
 
     #[test]
     fn maps_trough_center_to_middle_value() {
@@ -77,24 +61,6 @@ mod tests {
     #[test]
     fn clamps_positions_past_the_trailing_pad_to_the_upper_bound() {
         assert_eq!(value_from_trough_x(228.0, 228.0, 0.0, 2.0), 2.0);
-    }
-
-    #[test]
-    fn ranks_profiles_low_to_high_power_regardless_of_input_order() {
-        let mut profiles = vec![
-            "balanced".to_owned(),
-            "performance".to_owned(),
-            "power-saver".to_owned(),
-        ];
-        profiles.sort_by_key(|name| profile_rank(name));
-        assert_eq!(profiles, ["power-saver", "balanced", "performance"]);
-    }
-
-    #[test]
-    fn ranks_unknown_profiles_after_the_well_known_ones() {
-        let mut profiles = vec!["custom-backend-profile".to_owned(), "balanced".to_owned()];
-        profiles.sort_by_key(|name| profile_rank(name));
-        assert_eq!(profiles, ["balanced", "custom-backend-profile"]);
     }
 
     #[test]
@@ -443,8 +409,7 @@ impl PowerProfilesWidget {
     pub fn update_profiles(&self, profiles: &[String]) {
         self.updating.set(true);
         let mut inner = self.inner.borrow_mut();
-        let mut profiles = profiles.to_vec();
-        profiles.sort_by_key(|name| profile_rank(name));
+        let profiles = profiles.to_vec();
         inner.profiles = profiles.clone();
 
         for child in self.mark_fixed.children() {
