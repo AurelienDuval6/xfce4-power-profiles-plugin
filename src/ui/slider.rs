@@ -116,15 +116,6 @@ struct Inner {
     plugin: *mut c_void,
 }
 
-/// Tracks [`PowerProfilesWidget::trough_width`] as it settles — see that
-/// field's doc comment.
-#[derive(Clone, Copy)]
-enum TroughWidth {
-    Unread,
-    Pending(i32),
-    Settled(i32),
-}
-
 /// Panel widget with button, popup slider, and D-Bus integration.
 ///
 /// Cloneable via `Rc` (not deep clone). The `updating` flag is a separate
@@ -135,11 +126,6 @@ pub struct PowerProfilesWidget {
     inner: Rc<RefCell<Inner>>,
     updating: Rc<Cell<bool>>,
     mark_fixed: gtk::Fixed,
-    /// `scale`'s real settled allocated width, captured live once it stops
-    /// changing between calls and reused from then on — see
-    /// [`PowerProfilesWidget::reposition_marks`] for why it's captured this
-    /// way rather than read fresh every time or hardcoded as a constant.
-    trough_width: Rc<Cell<TroughWidth>>,
 }
 
 impl PowerProfilesWidget {
@@ -220,7 +206,6 @@ impl PowerProfilesWidget {
             inner: Rc::new(RefCell::new(inner)),
             updating: Rc::new(Cell::new(false)),
             mark_fixed,
-            trough_width: Rc::new(Cell::new(TroughWidth::Unread)),
         };
 
         // Reposition mark icons whenever the scale is resized.
@@ -247,31 +232,6 @@ impl PowerProfilesWidget {
     /// sits inside the scale's allocation, so the icons line up with the
     /// tick positions the scale draws.
     ///
-    /// `scale`'s real allocated width always ends up a little more than
-    /// [`SCALE_WIDTH`], since the popup's own margins and the box's
-    /// allocation pad it further. That extra amount isn't a fixed
-    /// constant: it was measured
-    /// at 180, 194, 198, and 202px across separate panel restarts — a
-    /// same-theme, same-machine spread wide enough to visibly throw off
-    /// mark positions if hardcoded (icons drifting further right the higher
-    /// their value, since `power-saver` sits at the trough's zero point
-    /// regardless of width but `balanced`/`performance` don't).
-    ///
-    /// So this reads the live allocation instead — but not on every call.
-    /// `mark_fixed` is a sibling of `scale` in the same box, and a
-    /// `GtkFixed`'s minimum width always equals its natural width — both are
-    /// simply `max(child.x + child.width)`, with no "needs" vs. "would
-    /// like" distinction a wrapping container could otherwise cap. So
-    /// whatever `mark_fixed` requests here leaks into the shared box's
-    /// width, which widens `scale`'s next allocation, which would get read
-    /// back in on the *next* call if read live unconditionally —
-    /// compounding a little further on every open (the popup and its
-    /// children are created once and reused, so the drift never resets on
-    /// its own); confirmed empirically as a live reproduction of the
-    /// growth bug. Reading until the value repeats, then freezing
-    /// there for good, gets the precision of a live read (tracking
-    /// whatever this session's real width happens to be) without an
-    /// unbounded read ever remaining in the loop to compound.
     fn reposition_marks(&self, scale: &gtk::Scale) {
         let inner = self.inner.borrow();
         let icons = &inner.mark_icons;
@@ -288,28 +248,7 @@ impl PowerProfilesWidget {
             return;
         }
 
-        let scale_width = match self.trough_width.get() {
-            TroughWidth::Settled(w) => w,
-            TroughWidth::Unread => {
-                let w = scale.allocation().width();
-                if w > 0 {
-                    self.trough_width.set(TroughWidth::Pending(w));
-                }
-                w
-            }
-            TroughWidth::Pending(prev) => {
-                let w = scale.allocation().width();
-                if w > 0 {
-                    self.trough_width.set(if w == prev {
-                        TroughWidth::Settled(w)
-                    } else {
-                        TroughWidth::Pending(w)
-                    });
-                }
-                w
-            }
-        };
-        let trough_w = f64::from(scale_width) - 2.0 * TROUGH_PAD;
+        let trough_w = f64::from(scale.allocation().width()) - 2.0 * TROUGH_PAD;
 
         for (i, icon) in icons.iter().enumerate() {
             let v = i as f64;
