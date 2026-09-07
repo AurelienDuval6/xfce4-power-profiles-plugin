@@ -156,8 +156,8 @@ struct Inner {
 #[derive(Clone, Copy)]
 enum TroughWidth {
     Unread,
-    Pending(f64),
-    Settled(f64),
+    Pending(i32),
+    Settled(i32),
 }
 
 /// Panel widget with button, popup menu, and D-Bus integration.
@@ -403,16 +403,16 @@ impl PowerProfilesWidget {
         let scale_width = match self.trough_width.get() {
             TroughWidth::Settled(w) => w,
             TroughWidth::Unread => {
-                let w = f64::from(scale.allocation().width());
-                if w > 0.0 {
+                let w = scale.allocation().width();
+                if w > 0 {
                     self.trough_width.set(TroughWidth::Pending(w));
                 }
                 w
             }
             TroughWidth::Pending(prev) => {
-                let w = f64::from(scale.allocation().width());
-                if w > 0.0 {
-                    self.trough_width.set(if (w - prev).abs() < f64::EPSILON {
+                let w = scale.allocation().width();
+                if w > 0 {
+                    self.trough_width.set(if w == prev {
                         TroughWidth::Settled(w)
                     } else {
                         TroughWidth::Pending(w)
@@ -421,7 +421,7 @@ impl PowerProfilesWidget {
                 w
             }
         };
-        let trough_w = scale_width - 2.0 * TROUGH_PAD;
+        let trough_w = f64::from(scale_width) - 2.0 * TROUGH_PAD;
 
         for (i, icon) in icons.iter().enumerate() {
             let v = i as f64;
