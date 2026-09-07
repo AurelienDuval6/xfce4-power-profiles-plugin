@@ -23,17 +23,15 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 /// Approximate padding, in pixels, between a [`gtk::Scale`]'s allocation edge
-/// and its trough. Used both here (to map a click position to a value) and in
-/// [`PowerProfilesWidget::reposition_marks`] (to place mark icons), so clicks
-/// line up with where the icons visually sit.
+/// and its trough. Used by [`PowerProfilesWidget::reposition_marks`] to place
+/// the mark icons over the tick positions the scale draws.
 const TROUGH_PAD: f64 = 12.0;
 
-/// Minimum width, in pixels, requested for the popup's scale.
-///
-/// `scale`'s real allocated width always ends up a little more than this —
-/// see [`PowerProfilesWidget::reposition_marks`] for why that extra amount
-/// is measured live each show rather than hardcoded, and
-/// [`PowerProfilesWidget::trough_width`] for the mechanism.
+/// Minimum width, in pixels, requested for the popup's scale. The real
+/// allocated width ends up a little more than this, since the popup's own
+/// margins pad it further, which is why
+/// [`PowerProfilesWidget::reposition_marks`] positions the mark icons from
+/// the live allocation rather than from this constant.
 const SCALE_WIDTH: f64 = 180.0;
 
 /// Menu-like chrome for the popup window, drawn from the theme's own named
