@@ -482,8 +482,7 @@ impl PowerProfilesWidget {
     pub fn update_profiles(&self, profiles: &[String]) {
         self.updating.set(true);
         let mut inner = self.inner.borrow_mut();
-        let profiles = profiles.to_vec();
-        inner.profiles = profiles.clone();
+        inner.profiles = profiles.to_vec();
 
         for child in self.mark_fixed.children() {
             self.mark_fixed.remove(&child);
@@ -503,7 +502,7 @@ impl PowerProfilesWidget {
                     .scale
                     .add_mark(i as f64, gtk::PositionType::Bottom, None);
             }
-            for name in &profiles {
+            for name in profiles {
                 let icon = gtk::Image::from_icon_name(
                     Some(profile_icon(name)),
                     gtk::IconSize::SmallToolbar,
