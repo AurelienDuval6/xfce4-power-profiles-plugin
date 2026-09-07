@@ -216,6 +216,9 @@ impl PowerProfilesWidget {
         );
         // Tracks whether the primary button is held down over the item, so
         // motion events only drag the slider during an actual click-drag.
+        // A press can't be relied on to be balanced by a release on this
+        // item, so the flag is also cleared menu-side and on every
+        // hide/show — see the handlers on `menu` below.
         let dragging = Rc::new(Cell::new(false));
         {
             let scale = scale.clone();
@@ -233,15 +236,14 @@ impl PowerProfilesWidget {
         }
         {
             let dragging = dragging.clone();
-            item.connect_button_release_event(move |_, event| {
-                if event.button() == 1 {
-                    dragging.set(false);
-                }
+            item.connect_button_release_event(move |_, _| {
+                dragging.set(false);
                 glib::Propagation::Stop
             });
         }
         {
             let scale = scale.clone();
+            let dragging = dragging.clone();
             item.connect_motion_notify_event(move |item, event| {
                 if dragging.get() {
                     let (x, y) = event.position();
@@ -266,6 +268,34 @@ impl PowerProfilesWidget {
         menu.set_reserve_toggle_size(false);
         menu.append(&item);
         menu.show_all();
+
+        // GtkMenuShell holds the pointer grab for as long as the menu is
+        // open, so a release that lands anywhere but on the item — outside
+        // the popup, or on the menu's own chrome at its very edge — is
+        // delivered to the shell and never reaches the item's release
+        // handler above, leaving `dragging` set. Clear it here as well, and
+        // again whenever the menu is hidden or shown, so a drag can never
+        // outlive the popup it started in: however a press ends, the next
+        // open always starts with the slider idle.
+        {
+            let dragging = dragging.clone();
+            menu.connect_button_release_event(move |_, _| {
+                dragging.set(false);
+                glib::Propagation::Proceed
+            });
+        }
+        {
+            let dragging = dragging.clone();
+            menu.connect_hide(move |_| dragging.set(false));
+        }
+        {
+            let dragging = dragging.clone();
+            menu.connect_show(move |_| dragging.set(false));
+        }
+        {
+            let dragging = dragging.clone();
+            menu.connect_map(move |_| dragging.set(false));
+        }
 
         // GtkMenuShell grabs keyboard input while the menu is open and
         // handles arrow keys itself for item-to-item navigation — a no-op
