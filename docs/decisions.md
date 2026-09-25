@@ -55,3 +55,11 @@
 **Decision:** Use `Rc<RefCell<Inner>>` for shared ownership and `Rc<Cell<bool>>` for the `updating` flag (separate from `RefCell` to prevent re-entrant borrow panics). The widget struct implements `Clone` via `Rc::clone`.
 
 **Consequences:** Single-threaded only (no `Send`/`Sync`), which is fine since everything runs on the GTK main loop. The `updating` flag prevents infinite callback loops when `set_value` triggers `value_changed`.
+
+## 2026-09-25: Popup chrome comes from the theme's `window` node
+
+**Context:** Replacing the `GtkMenu` popup with a plain `gtk::Window` carrying `GDK_WINDOW_TYPE_HINT_POPUP_MENU` meant losing the `menu` CSS node, whose themed background, border and rounded corners a `GtkMenu` gets for free. A CSS provider was added to fake that chrome. Two problems with it: `border-radius` on an undecorated window is the same construct the 2026-08-26 entry rejected, and re-applying the type hint from `::show` only fixes how the window is *classified* (focus, stacking, taskbar), not how it is *composited*, so the ARGB constraint behind the black-corner artifact under xfwm4 still held. The provider was also registered screen-wide at `STYLE_PROVIDER_PRIORITY_APPLICATION` rather than on the widget's own style context.
+
+**Decision:** No CSS provider. The `power-profiles-popup` class goes with it, since the stylesheet was its only consumer. The popup renders with the theme's `window` node: sharp corners, theme background and border.
+
+**Consequences:** The 2026-08-26 entry stands as the governing decision; this one records that its CSS was reintroduced by the `GtkMenu` swap and has now been removed again, so the two agree. Rounded corners stay unreachable until the ARGB constraint is resolved. Popup appearance is now whatever the theme gives a `window`, which is a constraint to work within rather than a bug to fix. Any future restyling has to go through the theme or a widget-scoped provider, not a screen-wide one.

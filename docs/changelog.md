@@ -56,3 +56,14 @@
 - Added `///` doc comments to all public items and key internal types
 - `cargo doc --no-deps` generates clean API documentation at `target/doc/powerprofiles/index.html`
 - Added "Generating Documentation" section to `docs/setup.md`
+
+## 2026-09-25 — Popup chrome and focus
+
+### Changes
+- Popup renders with the theme's own `window` node (sharp corners) — removed the CSS provider and the `power-profiles-popup` class that only it consumed, reinstating the 2026-08-26 ARGB finding recorded in `decisions.md`
+- Moved the arrow-key focus grab back onto the button-click path, after `xfce_panel_plugin_popup_window()` has shown the window. Grabbing from `::show` also fired on the construction-time `show_all()` and ran before the window was mapped, where a focus request is recorded rather than applied
+- `SCALE_WIDTH` is an `i32`; it was only ever a pixel count
+
+### Fixes
+- Clamped the trough width in `reposition_marks()` to zero so mark icons no longer compute a negative trough before the scale is first allocated
+- Corrected a `reposition_marks()` doc comment still referring to the `trough_width` settle machinery removed in 3509b09 (the only `cargo doc` warning left in the crate)
