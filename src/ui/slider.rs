@@ -277,9 +277,15 @@ impl PowerProfilesWidget {
                 }
                 let snapped = s.value().round();
                 if (s.value() - snapped).abs() > f64::EPSILON {
-                    this.updating.set(true);
+                    // A drag can land between ticks. GtkRange's round-digits
+                    // defaults to -1, which derives its rounding precision
+                    // from the adjustment's step increment, so a value like
+                    // 1.7 really does reach this handler. Snapping re-enters
+                    // here with an integral value, and it is that nested call
+                    // which notifies — so `updating` must not be raised to
+                    // suppress it, and this frame must not notify a second
+                    // time.
                     s.set_value(snapped);
-                    this.updating.set(false);
                     return;
                 }
                 let pos = snapped as usize;
@@ -309,19 +315,20 @@ impl PowerProfilesWidget {
             self.mark_fixed.remove(&child);
         }
         inner.mark_icons.clear();
+        // `add_mark` appends rather than replaces, so without this the ticks
+        // from every earlier profile list survive and stack up as duplicates
+        // on the same positions.
+        inner.scale.clear_marks();
+
+        let scale = inner.scale.clone();
 
         if profiles.is_empty() {
-            inner.scale.set_sensitive(false);
+            scale.set_sensitive(false);
         } else {
-            inner.scale.set_sensitive(true);
-            inner
-                .scale
-                .adjustment()
-                .set_upper((profiles.len() as f64) - 1.0);
+            scale.set_sensitive(true);
+            scale.adjustment().set_upper((profiles.len() as f64) - 1.0);
             for i in 0..profiles.len() {
-                inner
-                    .scale
-                    .add_mark(i as f64, gtk::PositionType::Bottom, None);
+                scale.add_mark(i as f64, gtk::PositionType::Bottom, None);
             }
             for name in profiles {
                 let icon = gtk::Image::from_icon_name(
@@ -333,6 +340,16 @@ impl PowerProfilesWidget {
             }
             self.mark_fixed.show_all();
         }
+
+        // The icons are placed at the origin and normally moved by
+        // `size_allocate`, but the scale is already at its final width when
+        // the profile list changes while the popup is closed, and GTK skips
+        // the allocation when nothing resized. Placing them here covers that
+        // case. The mutable borrow has to go first: `reposition_marks` takes
+        // its own shared borrow of `inner`.
+        drop(inner);
+        self.reposition_marks(&scale);
+
         self.updating.set(false);
     }
 
