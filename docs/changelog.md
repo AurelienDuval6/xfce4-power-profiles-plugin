@@ -67,3 +67,10 @@
 ### Fixes
 - Clamped the trough width in `reposition_marks()` to zero so mark icons no longer compute a negative trough before the scale is first allocated
 - Corrected a `reposition_marks()` doc comment still referring to the `trough_width` settle machinery removed in 3509b09 (the only `cargo doc` warning left in the crate)
+
+## 2026-09-25 — Profile list and drag fixes
+
+### Fixes
+- Cleared the scale's tick marks before rebuilding them in `update_profiles()`. `gtk_scale_add_mark()` appends, so every `ProfilesChanged` signal and every daemon reconnect stacked another set of ticks on the same positions, and an empty profile list left the old ones behind
+- Releasing a drag between two ticks now selects the nearest profile. The snap path raised `updating` around `set_value()`, which suppressed the nested `value-changed` that carries the notification, then returned without notifying — so `on_selected` never fired. `GtkRange`'s `round-digits` defaults to -1 and takes its precision from the adjustment's step increment, so off-tick values like 1.7 do reach the handler
+- Mark icons are now placed directly at the end of `update_profiles()`, not only from the scale's `size_allocate`. Changing the profile list while the popup was closed left them stacked at the origin, because GTK skips an allocation whose size has not changed
