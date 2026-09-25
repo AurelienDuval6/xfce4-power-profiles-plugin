@@ -256,6 +256,16 @@ impl PowerProfilesWidget {
         popup_box.set_margin_top(6);
         popup_box.set_margin_bottom(6);
         popup_box.pack_start(&scale, true, true, 0);
+        // Packed without expanding, and deliberately kept from widening the
+        // popup. mark_fixed's natural width is whatever the icon positions
+        // reach, and those are computed by reposition_marks() from the scale's
+        // allocation — so anything that lets that allocation grow widens the
+        // popup, which widens the allocation again. That loop is what made the
+        // popup grow on every open before. It holds because the scale asks for
+        // SCALE_WIDTH plus the margins either side (196px) while the marks need
+        // at most `alloc - 4`, leaving 4px of headroom once settled. Widening
+        // the margins, lowering SCALE_WIDTH or enlarging the icons closes that
+        // gap and brings the loop back.
         popup_box.pack_start(&mark_fixed, false, false, 0);
 
         let popup = gtk::Window::new(gtk::WindowType::Toplevel);
