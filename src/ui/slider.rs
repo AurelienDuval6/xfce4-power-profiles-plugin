@@ -48,9 +48,118 @@ fn profile_icon(name: &str) -> &str {
     }
 }
 
+/// X offset, in pixels, of the mark icon standing for `v` on a scale whose
+/// adjustment runs from `lower` to `upper` and which is `alloc_w` pixels wide.
+///
+/// Returns `None` when the adjustment has no span, which is the case for a
+/// single profile and for the placeholder range in place before the first
+/// profile list arrives from D-Bus.
+///
+/// The trough is taken to sit [`TROUGH_PAD`] in from each edge of the scale's
+/// allocation, and the result is pulled left by [`MARK_ICON_HALF_WIDTH`] so a
+/// tick lands on its icon's centre. Values outside the adjustment clamp to the
+/// trough ends rather than being placed beyond them.
+fn mark_offset(v: f64, lower: f64, upper: f64, alloc_w: i32) -> Option<i32> {
+    let range = upper - lower;
+    if range <= 0.0 {
+        return None;
+    }
+    // Clamped because the scale can be allocated before it is ever shown, when
+    // its width may not cover the trough padding on both sides.
+    let trough_w = (f64::from(alloc_w) - 2.0 * TROUGH_PAD).max(0.0);
+    let px = ((v - lower) / range).clamp(0.0, 1.0) * trough_w + TROUGH_PAD;
+    Some((px - MARK_ICON_HALF_WIDTH) as i32)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::profile_icon;
+    use super::{mark_offset, profile_icon, MARK_ICON_HALF_WIDTH, TROUGH_PAD};
+
+    /// A settled popup allocates its 180px scale request plus 8px of margin on
+    /// each side.
+    const SETTLED: i32 = 196;
+
+    /// X offset of the leftmost mark: the trough's left edge, less half an icon.
+    fn left_end() -> i32 {
+        (TROUGH_PAD - MARK_ICON_HALF_WIDTH) as i32
+    }
+
+    /// X offset of the rightmost mark of a scale `alloc_w` wide, which depends
+    /// only on the trough's right edge.
+    fn right_end(alloc_w: i32) -> i32 {
+        (f64::from(alloc_w) - TROUGH_PAD - MARK_ICON_HALF_WIDTH) as i32
+    }
+
+    #[test]
+    fn first_and_last_marks_sit_on_the_trough_ends() {
+        assert_eq!(mark_offset(0.0, 0.0, 2.0, SETTLED), Some(left_end()));
+        assert_eq!(
+            mark_offset(2.0, 0.0, 2.0, SETTLED),
+            Some(right_end(SETTLED))
+        );
+    }
+
+    #[test]
+    fn marks_are_evenly_spaced_and_ascending() {
+        let offsets: Vec<i32> = (0..3)
+            .map(|i| mark_offset(i as f64, 0.0, 2.0, SETTLED).expect("span is 2"))
+            .collect();
+        assert!(offsets[0] < offsets[1] && offsets[1] < offsets[2]);
+        assert_eq!(offsets[1] - offsets[0], offsets[2] - offsets[1]);
+    }
+
+    #[test]
+    fn narrow_allocations_collapse_the_trough_never_left_of_zero() {
+        // Widths at and below the 2 * TROUGH_PAD the trough is inset by: the
+        // trough collapses to zero and every mark lands on the same offset.
+        for alloc_w in [0, 1, 12, 23, 24] {
+            let first = mark_offset(0.0, 0.0, 2.0, alloc_w).expect("span is 2");
+            for v in 0..3 {
+                let x = mark_offset(f64::from(v), 0.0, 2.0, alloc_w).expect("span is 2");
+                assert!(x >= 0, "negative offset {x} at width {alloc_w}, value {v}");
+                assert_eq!(x, first, "trough should collapse at width {alloc_w}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_range_with_no_span_yields_no_offsets() {
+        // One profile: lower == upper.
+        assert_eq!(mark_offset(0.0, 0.0, 0.0, SETTLED), None);
+        // Inverted range.
+        assert_eq!(mark_offset(1.0, 0.0, -1.0, SETTLED), None);
+    }
+
+    #[test]
+    fn out_of_range_values_clamp_to_the_trough_ends() {
+        assert_eq!(mark_offset(-1.0, 0.0, 2.0, SETTLED), Some(left_end()));
+        assert_eq!(
+            mark_offset(9.0, 0.0, 2.0, SETTLED),
+            Some(right_end(SETTLED))
+        );
+    }
+
+    #[test]
+    fn the_first_mark_is_pinned_while_the_last_follows_the_width() {
+        // The trough padding is a fixed inset, so growing the scale must not
+        // shift the low end — only stretch the span.
+        assert_eq!(
+            mark_offset(0.0, 0.0, 2.0, 320),
+            mark_offset(0.0, 0.0, 2.0, SETTLED)
+        );
+        assert!(mark_offset(2.0, 0.0, 2.0, 320).expect("span is 2") > right_end(SETTLED));
+    }
+
+    #[test]
+    fn marks_sit_where_the_scale_draws_its_ticks() {
+        // The scale's own value at the midpoint of its allocation is halfway
+        // between the marks, so the mark offsets must bracket the trough's
+        // midpoint symmetrically.
+        let mid = mark_offset(1.0, 0.0, 2.0, SETTLED).expect("span is 2");
+        let low = left_end();
+        let high = right_end(SETTLED);
+        assert_eq!(low + high, 2 * mid);
+    }
 
     #[test]
     fn maps_known_power_saver_profile() {
@@ -205,42 +314,27 @@ impl PowerProfilesWidget {
 
     /// Recalculates mark icon positions based on the scale's trough geometry.
     ///
-    /// Icons are placed in a `gtk::Fixed` overlay. Positions are computed
-    /// from `scale`'s live allocated width, using a [`TROUGH_PAD`]
-    /// approximation of where the trough sits inside that allocation, so the
-    /// icons line up with the tick positions the scale draws. Reading the
-    /// live width rather than a constant is what keeps the icons aligned
-    /// across themes and panel sizes, since the scale is allocated slightly
-    /// wider than the width it requests.
+    /// Icons are placed in a `gtk::Fixed` overlay, each at the offset
+    /// [`mark_offset`] gives for its position in the profile list. Reading the
+    /// scale's live allocation rather than a constant is what keeps the icons
+    /// aligned across themes and panel sizes, since the scale is allocated
+    /// slightly wider than the width it requests.
     ///
     fn reposition_marks(&self, scale: &gtk::Scale) {
         let inner = self.inner.borrow();
         let icons = &inner.mark_icons;
-        let n = icons.len();
-        if n == 0 {
+        if icons.is_empty() {
             return;
         }
 
         let adj = scale.adjustment();
-        let lower = adj.lower();
-        let upper = adj.upper();
-        let range = upper - lower;
-        if range <= 0.0 {
-            return;
-        }
-
-        // Clamped because the scale can be allocated before it is ever shown,
-        // when its width may not yet cover the trough padding on both sides.
-        let trough_w = (f64::from(scale.allocation().width()) - 2.0 * TROUGH_PAD).max(0.0);
+        let (lower, upper) = (adj.lower(), adj.upper());
+        let alloc_w = scale.allocation().width();
 
         for (i, icon) in icons.iter().enumerate() {
-            let v = i as f64;
-            // `i` covers 0..icons.len() and the adjustment spans exactly that
-            // many steps from zero, so `v` sits within [lower, upper] by
-            // construction and `px` never falls left of TROUGH_PAD.
-            let px = ((v - lower) / range).mul_add(trough_w, TROUGH_PAD);
-            self.mark_fixed
-                .move_(icon, (px - MARK_ICON_HALF_WIDTH) as i32, 0);
+            if let Some(x) = mark_offset(i as f64, lower, upper, alloc_w) {
+                self.mark_fixed.move_(icon, x, 0);
+            }
         }
     }
 
