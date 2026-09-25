@@ -27,24 +27,17 @@ use gtk::prelude::*;
 /// the mark icons over the tick positions the scale draws.
 const TROUGH_PAD: f64 = 12.0;
 
+/// Half the width of a [`gtk::IconSize::SmallToolbar`] icon, subtracted from a
+/// mark's position so the tick lands on the icon's centre rather than its left
+/// edge.
+const MARK_ICON_HALF_WIDTH: f64 = 8.0;
+
 /// Minimum width, in pixels, requested for the popup's scale. The real
 /// allocated width ends up a little more than this, since the popup's own
 /// margins pad it further, which is why
 /// [`PowerProfilesWidget::reposition_marks`] positions the mark icons from
 /// the live allocation rather than from this constant.
-const SCALE_WIDTH: f64 = 180.0;
-
-/// Menu-like chrome for the popup window, drawn from the theme's own named
-/// colours so it follows the user's GTK theme rather than hardcoding one.
-/// A `GtkMenu` gets this from the theme's `menu` CSS node for free; a plain
-/// window's node is `window`, which themes style as an application window.
-const POPUP_CSS: &str = "
-window.power-profiles-popup {
-    background-color: @theme_bg_color;
-    border: 1px solid alpha(@theme_fg_color, 0.25);
-    border-radius: 4px;
-}
-";
+const SCALE_WIDTH: i32 = 180;
 
 /// Maps a profile name to its standard Adwaita symbolic icon name.
 fn profile_icon(name: &str) -> &str {
@@ -143,7 +136,7 @@ impl PowerProfilesWidget {
         let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
         scale.set_draw_value(false);
         scale.set_hexpand(true);
-        scale.set_size_request(SCALE_WIDTH as i32, -1);
+        scale.set_size_request(SCALE_WIDTH, -1);
 
         let mark_fixed = gtk::Fixed::new();
         mark_fixed.set_halign(gtk::Align::Fill);
@@ -170,19 +163,7 @@ impl PowerProfilesWidget {
         popup.set_decorated(false);
         popup.set_skip_taskbar_hint(true);
         popup.set_skip_pager_hint(true);
-        popup.style_context().add_class("power-profiles-popup");
         popup.add(&popup_box);
-
-        if let Some(screen) = gtk::gdk::Screen::default() {
-            let provider = gtk::CssProvider::new();
-            if provider.load_from_data(POPUP_CSS.as_bytes()).is_ok() {
-                gtk::StyleContext::add_provider_for_screen(
-                    &screen,
-                    &provider,
-                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-                );
-            }
-        }
 
         // Initial show/hide so the window is realized before popup_window()
         // positions it.
@@ -225,10 +206,12 @@ impl PowerProfilesWidget {
     /// Recalculates mark icon positions based on the scale's trough geometry.
     ///
     /// Icons are placed in a `gtk::Fixed` overlay. Positions are computed
-    /// from [`Self::trough_width`] — `scale`'s real allocated width, once it
-    /// settles — using a [`TROUGH_PAD`] approximation of where the trough
-    /// sits inside the scale's allocation, so the icons line up with the
-    /// tick positions the scale draws.
+    /// from `scale`'s live allocated width, using a [`TROUGH_PAD`]
+    /// approximation of where the trough sits inside that allocation, so the
+    /// icons line up with the tick positions the scale draws. Reading the
+    /// live width rather than a constant is what keeps the icons aligned
+    /// across themes and panel sizes, since the scale is allocated slightly
+    /// wider than the width it requests.
     ///
     fn reposition_marks(&self, scale: &gtk::Scale) {
         let inner = self.inner.borrow();
@@ -246,12 +229,18 @@ impl PowerProfilesWidget {
             return;
         }
 
-        let trough_w = f64::from(scale.allocation().width()) - 2.0 * TROUGH_PAD;
+        // Clamped because the scale can be allocated before it is ever shown,
+        // when its width may not yet cover the trough padding on both sides.
+        let trough_w = (f64::from(scale.allocation().width()) - 2.0 * TROUGH_PAD).max(0.0);
 
         for (i, icon) in icons.iter().enumerate() {
             let v = i as f64;
+            // `i` covers 0..icons.len() and the adjustment spans exactly that
+            // many steps from zero, so `v` sits within [lower, upper] by
+            // construction and `px` never falls left of TROUGH_PAD.
             let px = ((v - lower) / range).mul_add(trough_w, TROUGH_PAD);
-            self.mark_fixed.move_(icon, (px - 8.0).max(0.0) as i32, 0);
+            self.mark_fixed
+                .move_(icon, (px - MARK_ICON_HALF_WIDTH) as i32, 0);
         }
     }
 
@@ -269,8 +258,12 @@ impl PowerProfilesWidget {
                         inner.button.as_ptr().cast::<c_void>(),
                     );
                 }
-                // The scale is the only focusable widget in the popup;
-                // focusing it explicitly is what makes arrow keys work.
+                // The scale is the only focusable widget in the popup, and
+                // arrow keys only reach it once it holds the keyboard focus.
+                // Grabbing from ::show instead would also fire on the
+                // construction-time show_all() in new(), and would run before
+                // the window is mapped, where a focus request is merely
+                // recorded rather than applied.
                 inner.scale.grab_focus();
             });
         }
